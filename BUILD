@@ -1443,3 +1443,27 @@ cc_test(
         "@com_google_googletest//:gtest",
     ],
 )
+
+cc_library(
+    name = "evolved_scheduler",
+    srcs = ["schedulers/evolved_fifo/scheduler.h",
+            "schedulers/evolved_fifo/scheduler.cc",
+    ],
+    hdrs = ["schedulers/evolved_fifo/scheduler.h"],
+    deps  = [
+        ":fifo_per_cpu_scheduler",
+        ":agent",
+    ],
+    copts = compiler_flags,
+)
+
+cc_binary(
+    name = "evolved_agent",
+    srcs = ["schedulers/evolved_fifo/agent.cc"],
+    deps = [
+        ":agent",
+        ":evolved_scheduler",
+        "@com_google_absl//absl/debugging:symbolize",
+        "@com_google_absl//absl/flags:parse",
+    ],
+)
