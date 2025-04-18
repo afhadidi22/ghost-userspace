@@ -1467,3 +1467,14 @@ cc_binary(
         "@com_google_absl//absl/flags:parse",
     ],
 )
+
+cc_binary(
+    name = "latency_harness",
+    srcs = ["latency_harness.cc"],
+    deps = [
+        ":ghost",     
+        ":base",
+        "@com_google_absl//absl/time",
+        ],
+    copts = ["-O2"],
+)

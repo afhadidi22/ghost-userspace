@@ -1,4 +1,9 @@
-// schedulers/bs_fifo/bs_fifo_agent.cc
+// Copyright 2021 Google LLC
+//
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file or at
+// https://developers.google.com/open-source/licenses/bsd
+
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -7,7 +12,7 @@
 #include "absl/flags/parse.h"
 #include "lib/agent.h"
 #include "lib/enclave.h"
-#include "schedulers/evolved_fifo/scheduler.h"
+#include "schedulers/fifo/per_cpu/fifo_scheduler.h"
 
 ABSL_FLAG(std::string, ghost_cpus, "1-5", "cpulist");
 ABSL_FLAG(std::string, enclave, "", "Connect to preexisting enclave directory");
@@ -19,37 +24,16 @@ static void ParseAgentConfig(AgentConfig* config) {
       MachineTopology()->ParseCpuStr(absl::GetFlag(FLAGS_ghost_cpus));
   CHECK(!ghost_cpus.Empty());
 
-  config->topology_ = MachineTopology();
+  Topology* topology = MachineTopology();
+  config->topology_ = topology;
   config->cpus_ = ghost_cpus;
-
-  std::string path = absl::GetFlag(FLAGS_enclave);
-  if (!path.empty()) {
-    int fd = open(path.c_str(), O_PATH);
+  std::string enclave = absl::GetFlag(FLAGS_enclave);
+  if (!enclave.empty()) {
+    int fd = open(enclave.c_str(), O_PATH);
     CHECK_GE(fd, 0);
     config->enclave_fd_ = fd;
   }
 }
-
-template <class EnclaveT>
-class FullBsFifoAgent : public FullAgent<EnclaveT> {
- public:
-  explicit FullBsFifoAgent(AgentConfig cfg) : FullAgent<EnclaveT>(cfg) {
-    scheduler_ = std::make_unique<BsFifoScheduler>(
-        &this->enclave_, *this->enclave_.cpus(),
-        std::make_shared<ThreadSafeMallocTaskAllocator<FifoTask>>());
-    this->StartAgentTasks();
-    this->enclave_.Ready();
-  }
-  ~FullBsFifoAgent() override { this->TerminateAgentTasks(); }
-
-  std::unique_ptr<Agent> MakeAgent(const Cpu& cpu) override {
-    return std::make_unique<FifoAgent>(&this->enclave_, cpu, scheduler_.get());
-  }
-  Scheduler* SchedulerForAgent() override { return scheduler_.get(); }
-
- private:
-  std::unique_ptr<BsFifoScheduler> scheduler_;
-};
 
 }  // namespace ghost
 
@@ -57,25 +41,47 @@ int main(int argc, char* argv[]) {
   absl::InitializeSymbolizer(argv[0]);
   absl::ParseCommandLine(argc, argv);
 
-  ghost::AgentConfig cfg;
-  ghost::ParseAgentConfig(&cfg);
+  ghost::AgentConfig config;
+  ghost::ParseAgentConfig(&config);
 
-  auto proc =
-      new ghost::AgentProcess<
-          ghost::FullBsFifoAgent<ghost::LocalEnclave>,
-          ghost::AgentConfig>(cfg);
+  printf("Initializing...\n");
+
+  // Using new so we can destruct the object before printing Done
+  auto uap = new ghost::AgentProcess<ghost::FullFifoAgent<ghost::LocalEnclave>,
+                                     ghost::AgentConfig>(config);
 
   ghost::GhostHelper()->InitCore();
-  printf("bs_fifo_agent: ready\n");
+  printf("Initialization complete, ghOSt active.\n");
+  // When `stdout` is directed to a terminal, it is newline-buffered. When
+  // `stdout` is directed to a non-interactive device (e.g, a Python subprocess
+  // pipe), it is fully buffered. Thus, in order for the Python script to read
+  // the initialization message as soon as it is passed to `printf`, we need to
+  // manually flush `stdout`.
   fflush(stdout);
 
   ghost::Notification exit;
-  ghost::GhostSignals::AddHandler(SIGINT,
-                                  [&exit](int) {
-                                    exit.Notify();
-                                    return true;
-                                  });
+  ghost::GhostSignals::AddHandler(SIGINT, [&exit](int) {
+    static bool first = true;  // We only modify the first SIGINT.
+
+    if (first) {
+      exit.Notify();
+      first = false;
+      return false;  // We'll exit on subsequent SIGTERMs.
+    }
+    return true;
+  });
+
+  // TODO: this is racy - uap could be deleted already
+  ghost::GhostSignals::AddHandler(SIGUSR1, [uap](int) {
+    uap->Rpc(ghost::FifoScheduler::kDebugRunqueue);
+    return false;
+  });
+
   exit.WaitForNotification();
-  delete proc;
-  printf("bs_fifo_agent: done\n");
+
+  delete uap;
+
+  printf("\nDone!\n");
+
+  return 0;
 }
